@@ -22,6 +22,10 @@
  *   S10 Route guard — writerGuard passes for ED via synchronous fast path
  *   S11 Settings page — view-only banner shown to non-writer
  *   S12 Settings page — view-only banner hidden for writer
+ *   S13 Route guard — writerGuard allows project meeting_coordinator on meetings route
+ *   S14 Route guard — writerGuard denial encodes _notice and shows Access Denied toast
+ *   S15 Route guard — writerGuard allows committee writer (committee_uid + null project read)
+ *   S16 Route guard — writerGuard denies non-writer committee member
  *
  * Failure messages include the persona × lens × page combination so CI output
  * pinpoints the exact regression without digging through traces.
@@ -66,7 +70,7 @@ const MOCK_PROJECT_ITEM: LensItem = {
   isFoundation: false,
 };
 
-function buildProjectStub(slug: string, writer: boolean) {
+function buildProjectStub(slug: string, writer: boolean, meetingCoordinator?: boolean) {
   return {
     uid: MOCK_PROJECT_UID,
     slug,
@@ -90,8 +94,13 @@ function buildProjectStub(slug: string, writer: boolean) {
     updated_at: new Date().toISOString(),
     mailing_list_count: 0,
     writer,
+    // Only surface meetingCoordinator when the caller explicitly stubs it — mirrors the BFF
+    // contract where the field is present only for ?meeting_coordinator=true non-writer reads.
+    ...(meetingCoordinator === undefined ? {} : { meetingCoordinator }),
   };
 }
+
+const MOCK_COMMITTEE_UID = 'c0000000-0000-0000-0000-000000000001';
 
 // ─── Sidebar testIds ───────────────────────────────────────────────────────────
 // Auto-generated pattern (sidebar.component.ts:91):
@@ -165,12 +174,12 @@ async function stubNavLensItems(page: Page, lens: 'foundation' | 'project', item
   });
 }
 
-async function stubProjectApi(page: Page, slug: string, writer: boolean): Promise<void> {
+async function stubProjectApi(page: Page, slug: string, writer: boolean, meetingCoordinator?: boolean): Promise<void> {
   await page.route(`**/api/projects/${slug}*`, (route) =>
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(buildProjectStub(slug, writer)),
+      body: JSON.stringify(buildProjectStub(slug, writer, meetingCoordinator)),
     })
   );
   // Stub the UID-based sfid lookup (ProjectContextService.selectedFoundationSfid).
@@ -545,6 +554,127 @@ test.describe('S10: Route guard — writerGuard fast path for ED persona', () =>
 
     // writerGuard returns true synchronously for ED (no project API call needed)
     await expect(page, 'persona=executive-director should remain on /project/meetings/create').toHaveURL(/\/project\/meetings\/create/, {
+      timeout: ELEMENT_TIMEOUT,
+    });
+  });
+});
+
+// ─── S13–S16: writerGuard meetings access matrix (PR #992) ─────────────────────
+// Regression coverage for the expanded meetings allowance: meeting_coordinator role,
+// committee-writer fallback when committee_uid is present, and the SSR-safe denial
+// notice. The guard requests ?meeting_coordinator=true only on the meetings path; the
+// stub honors that by surfacing meetingCoordinator on the project read.
+
+/** Returns the project as a 404 so the browser-side getProject() resolves to null. */
+async function stubProjectApiNotFound(page: Page, slug: string): Promise<void> {
+  await page.route(`**/api/projects/${slug}*`, (route) =>
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'not found' }),
+    })
+  );
+  await page.route('**/api/projects/*/sfid*', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ sfid: null }) })
+  );
+}
+
+/** Stubs GET /api/committees/:uid with the given writer flag (or a 403 when committee is null). */
+async function stubCommitteeApi(page: Page, uid: string, committee: { writer: boolean } | null): Promise<void> {
+  await page.route(`**/api/committees/${uid}*`, (route) => {
+    if (committee === null) {
+      return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ message: 'forbidden' }) });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ uid, name: 'Test Committee', writer: committee.writer }),
+    });
+  });
+}
+
+test.describe('S13: Route guard — writerGuard allows project meeting_coordinator on meetings route', () => {
+  test('contributor with meetingCoordinator=true (writer=false) is NOT redirected from /project/meetings/create', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    // writer=false but meetingCoordinator=true — the meetings path requests ?meeting_coordinator=true.
+    await stubProjectApi(page, MOCK_PROJECT_SLUG, false, true);
+    await setPersonaCookie(page, ['contributor']);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings/create?project=${MOCK_PROJECT_SLUG}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(page, 'persona=contributor meetingCoordinator=true should remain on /project/meetings/create').toHaveURL(/\/project\/meetings\/create/, {
+      timeout: ELEMENT_TIMEOUT,
+    });
+  });
+});
+
+test.describe('S14: Route guard — writerGuard denial encodes _notice and shows toast', () => {
+  test('contributor (writer=false, not coordinator) is redirected with _notice=meetings and sees Access Denied toast', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    await stubProjectApi(page, MOCK_PROJECT_SLUG, false, false);
+    await setPersonaCookie(page, ['contributor']);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings/create?project=${MOCK_PROJECT_SLUG}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(page, 'persona=contributor canWrite=false should be redirected to /project/overview').toHaveURL(/\/project\/overview/, {
+      timeout: ELEMENT_TIMEOUT,
+    });
+    // AppComponent consumes _notice on NavigationEnd and renders the contextual toast.
+    await expect(
+      page.getByText("You don't have permission to schedule meetings for this project."),
+      'denied meetings navigation should surface the Access Denied toast'
+    ).toBeVisible({ timeout: ELEMENT_TIMEOUT });
+    // _notice is stripped from the URL after consumption.
+    await expect(page, '_notice query param should be stripped after the toast renders').not.toHaveURL(/_notice/, { timeout: ELEMENT_TIMEOUT });
+  });
+});
+
+test.describe('S15: Route guard — writerGuard allows committee writer with committee_uid on meetings route', () => {
+  test('contributor with null project read but committee.writer=true is NOT redirected', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    // Project read fails (committee member without a direct project-level relation → null).
+    await stubProjectApiNotFound(page, MOCK_PROJECT_SLUG);
+    await stubCommitteeApi(page, MOCK_COMMITTEE_UID, { writer: true });
+    await setPersonaCookie(page, ['contributor']);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings/create?project=${MOCK_PROJECT_SLUG}&committee_uid=${MOCK_COMMITTEE_UID}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(page, 'committee writer with committee_uid should remain on /project/meetings/create').toHaveURL(/\/project\/meetings\/create/, {
+      timeout: ELEMENT_TIMEOUT,
+    });
+  });
+});
+
+test.describe('S16: Route guard — writerGuard denies non-writer committee member', () => {
+  test('contributor with null project read and committee.writer=false is redirected to overview', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    await stubProjectApiNotFound(page, MOCK_PROJECT_SLUG);
+    await stubCommitteeApi(page, MOCK_COMMITTEE_UID, { writer: false });
+    await setPersonaCookie(page, ['contributor']);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings/create?project=${MOCK_PROJECT_SLUG}&committee_uid=${MOCK_COMMITTEE_UID}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(page, 'committee non-writer should be redirected to /project/overview').toHaveURL(/\/project\/overview/, {
       timeout: ELEMENT_TIMEOUT,
     });
   });

@@ -59,13 +59,27 @@ export const writerGuard: CanActivateFn = (route: ActivatedRouteSnapshot) => {
   const deniedUrl = router.createUrlTree([overviewPath], { queryParams: { project: slug, _notice: writeFeature ?? 'access' } });
   const deny = () => deniedUrl;
 
+  // Committee writers can create meetings associated with their committee. Only applicable
+  // when a committee_uid is present in the route query params (set by committee-meetings
+  // .component's createMeetingQueryParams()) and the route is the meetings feature.
+  // Note: CommitteeService.getCommittee has a tap() that sets the committee signal as a
+  // side-effect. This is acceptable here — on deny the navigation is blocked before any
+  // committee view renders; on allow the committee page overwrites it.
+  const committeeFallback$ = () =>
+    committeeUid && writeFeature === 'meetings'
+      ? committeeService.getCommittee(committeeUid).pipe(
+          map((committee) => (committee?.writer === true ? (true as const) : deny())),
+          catchError(() => of(deny()))
+        )
+      : of(deny());
+
   return projectService.getProject(slug, false, { meetingCoordinator: writeFeature === 'meetings' }).pipe(
     switchMap((project) => {
-      // null means the project was unreachable or the user lacks viewer access — treat as
-      // a denial so they get feedback. Silent redirect was confusing for committee members
-      // who have committee access but no direct project-level OpenFGA relation.
+      // null means the project was unreachable or the user lacks viewer access. A committee
+      // member with no direct project-level OpenFGA relation hits this path, so fall through
+      // to the committee-writer check before denying rather than short-circuiting.
       if (project === null) {
-        return of(deny());
+        return committeeFallback$();
       }
       if (project.writer === true) {
         return of(true as const);
@@ -74,19 +88,7 @@ export const writerGuard: CanActivateFn = (route: ActivatedRouteSnapshot) => {
       if (writeFeature === 'meetings' && project.meetingCoordinator === true) {
         return of(true as const);
       }
-      // Committee writers can create meetings associated with their committee.
-      // Only applicable when a committee_uid is present in the route query params
-      // (set by committee-meetings.component's createMeetingQueryParams()).
-      // Note: CommitteeService.getCommittee has a tap() that sets the committee signal
-      // as a side-effect. This is acceptable here — on deny the navigation is blocked
-      // before any committee view renders; on allow the committee page overwrites it.
-      if (committeeUid && writeFeature === 'meetings') {
-        return committeeService.getCommittee(committeeUid).pipe(
-          map((committee) => (committee?.writer === true ? (true as const) : deny())),
-          catchError(() => of(deny()))
-        );
-      }
-      return of(deny());
+      return committeeFallback$();
     })
   );
 };
