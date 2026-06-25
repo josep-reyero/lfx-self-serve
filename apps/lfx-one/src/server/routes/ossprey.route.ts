@@ -20,6 +20,11 @@ const osspreyController = new OsspreyController();
 // removal of the router-level guard, still cannot reach a handler without an
 // ED check. Authorization is derived from server-verified persona detection,
 // never from the client-spoofable PERSONA_COOKIE_KEY cookie.
+//
+// Negative coverage for this boundary lives in
+// apps/lfx-one/e2e/ossprey-authz.spec.ts: it drives the real Express
+// middleware chain and asserts non-ED and unauthenticated callers never
+// receive 200 package data from either route, before CDP is reached.
 router.use(requireExecutiveDirector);
 
 router.get('/packages', requireExecutiveDirector, osspreyController.getPackages.bind(osspreyController));

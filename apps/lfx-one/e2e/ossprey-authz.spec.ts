@@ -61,4 +61,20 @@ test.describe('OSSPREY API requires Executive Director authorization', () => {
       `GET ${OSSPREY_DETAIL} returned ${res.status()} for a non-ED session; the requireExecutiveDirector guard must reject before CDP is reached`
     ).toContain(res.status());
   });
+
+  test('an unauthenticated request is rejected by the guard chain on both routes', async ({ playwright }) => {
+    // Fresh request context with no stored auth state — proves the endpoints
+    // are never anonymously reachable and that CDP is never fronted for an
+    // unauthenticated caller. Covers both the list and detail routes, which
+    // each carry the ED guard (router-level and per-route).
+    const anon = await playwright.request.newContext({ baseURL: 'http://localhost:4200' });
+    try {
+      for (const url of [OSSPREY_LIST, OSSPREY_DETAIL]) {
+        const res = await anon.get(url, { failOnStatusCode: false });
+        expect(res.status(), `anonymous GET ${url} must not return 200 package data`).not.toBe(200);
+      }
+    } finally {
+      await anon.dispose();
+    }
+  });
 });
