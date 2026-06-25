@@ -43,9 +43,19 @@ export class OsspreyController {
 
   public async getPackage(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = logger.startOperation(req, 'get_ossprey_package');
-    const purl = decodeURIComponent(req.params['purl'] as string);
 
     try {
+      // Express already decodes route params once, so a scoped npm PURL such as
+      // pkg:npm/%40scope/name arrives correctly decoded. Re-decoding would
+      // corrupt the %40 escape and can throw on stray percent escapes before
+      // the catch can forward to next(error), so use the param value as-is.
+      const purl = req.params['purl'];
+
+      if (!purl) {
+        res.status(400).json({ error: 'BAD_REQUEST', message: 'Package URL is required.' });
+        return;
+      }
+
       const pkg = await this.osspreyService.getPackage(req, purl);
 
       if (!pkg) {
