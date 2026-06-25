@@ -315,17 +315,16 @@ export class ProjectService {
       if (!includeMeetingCoordinator) {
         return writerProject;
       }
-      const isMeetingCoordinator = await this.accessCheckService
-        .checkSingleAccess(req, { resource: 'project', id: project.uid, access: 'meeting_coordinator' })
-        .catch((error) => {
-          logger.warning(req, 'get_project_by_id', 'meeting coordinator check failed, skipping field', {
-            project_uid: project.uid,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          // Return undefined rather than false — false implies the check ran clean and found no
-          // role; undefined preserves the "unknown" semantics documented on Project.meetingCoordinator.
-          return undefined;
-        });
+      // checkSingleAccess never rejects: AccessCheckService.checkAccess catches upstream
+      // failures internally and falls back to `false` for every requested access (logging
+      // the error there). So a transient /access-check failure yields `false`, not a thrown
+      // error — fail-closed, which is the safe default for an access-control gate (a
+      // would-be coordinator is denied on an outage rather than wrongly admitted).
+      const isMeetingCoordinator = await this.accessCheckService.checkSingleAccess(req, {
+        resource: 'project',
+        id: project.uid,
+        access: 'meeting_coordinator',
+      });
       return { ...writerProject, meetingCoordinator: isMeetingCoordinator };
     }
 

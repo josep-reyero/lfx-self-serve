@@ -16,9 +16,12 @@ export interface Project {
    * (`?meeting_coordinator=true`) and the user is not already a writer.
    *
    * - `true`      — user holds the `meeting_coordinator` role on this project.
-   * - `false`     — check ran clean; user does not hold the role.
-   * - `undefined` — check was not requested, was skipped (user is a writer), or failed
-   *   transiently. Do NOT treat as a definitive role denial.
+   * - `false`     — fail-closed: either the check ran clean and found no role, OR the
+   *   `/access-check` lookup failed transiently (AccessCheckService falls back to `false`
+   *   for every requested access). Treated as "no coordinator access" by callers, which is
+   *   the safe default for an access-control gate.
+   * - `undefined` — check was not requested or was skipped because the user is already a
+   *   writer (the role can't change the writer-OR-coordinator outcome, so it isn't run).
    */
   meetingCoordinator?: boolean;
   public: boolean;
