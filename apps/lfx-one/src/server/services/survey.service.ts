@@ -177,7 +177,7 @@ export class SurveyService {
     const enrichedData: CreateSurveyRequest = {
       ...surveyData,
       creator_id: effectiveUsername,
-      creator_username: effectiveName || effectiveUsername,
+      creator_username: effectiveUsername,
       creator_name: effectiveName || '',
     };
 
