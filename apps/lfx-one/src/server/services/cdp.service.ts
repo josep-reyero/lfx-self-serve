@@ -20,8 +20,8 @@ import { createHash, randomUUID } from 'crypto';
 import { Request } from 'express';
 
 import { CDP_PLATFORM_ICONS } from '@lfx-one/shared/constants';
-import { MicroserviceError } from '../errors';
-import { getEffectiveName } from '../utils/auth-helper';
+import { MicroserviceError, ServiceValidationError } from '../errors';
+import { getEffectiveName, getEffectiveUsername, usernameMatches } from '../utils/auth-helper';
 import { logger } from './logger.service';
 
 /**
@@ -144,6 +144,15 @@ export class CdpService {
    * so downstream identity/work/affiliation calls have a target.
    */
   public async resolveMember(req: Request | undefined, lfids: string[], emails?: string[]): Promise<string> {
+    // Guard up front: an empty/missing LFID would seed createMember with undefined values
+    // and surface as a confusing upstream 4xx/5xx. Fail fast with a clear validation error.
+    if (!lfids?.length || !lfids[0]) {
+      throw ServiceValidationError.forField('lfids', 'At least one LFID is required to resolve a CDP member', {
+        operation: 'resolve_cdp_member',
+        service: 'cdp_service',
+      });
+    }
+
     const resolved = await this.resolveMemberId(req, lfids, emails);
     if (resolved) {
       return resolved;
@@ -152,7 +161,15 @@ export class CdpService {
     // CDP responded OK but has no member for this user yet — create one seeded with
     // the user's LFID identity so subsequent identity/work/affiliation calls have a target.
     const lfid = lfids[0];
-    const displayName = (req && getEffectiveName(req)) || lfid;
+    // The seed identity's LFID and the display name must describe the SAME principal.
+    // getEffectiveName()/getEffectiveUsername() are impersonation-aware and return the
+    // impersonated target, while the LFID passed here is derived from the raw OIDC user
+    // (the impersonator during Admin Mode). Only adopt the effective name when its
+    // username actually matches the seed LFID; otherwise fall back to the LFID so we
+    // never mis-seed CDP with one user's identity under another user's display name.
+    const effectiveUsername = req ? getEffectiveUsername(req) : null;
+    const effectiveName = req ? getEffectiveName(req) : null;
+    const displayName = effectiveName && effectiveUsername && usernameMatches(effectiveUsername, lfid) ? effectiveName : lfid;
     const seedIdentity: CdpCreateIdentityRequest = {
       value: lfid,
       platform: 'lfid',
