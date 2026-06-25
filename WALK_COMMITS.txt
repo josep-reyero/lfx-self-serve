@@ -1,8 +1,0 @@
-# opening_head (already applied, chain starts here) = 9826c1bb
-3971555990dec51dd9d5ee8c9988cc60cf5772cd  fix(review): address PR #986 review feedback
-db8c41e054aaeb34b6ca208cb3a21fb8d7870db4  fix(profile): treat CDP resolve 404 as no-member to trigger create
-4fc838c97da2c144224eaa5f3b6eff2f5eb49c9f  fix(review): address PR #986 review feedback
-7359c67ca2abedcbb580a5a9ebccacacc8c5dfbb  fix(review): address PR #986 review feedback
-a9ac160236ce86b8c92123822e9da7fde2383350  fix(review): address PR #986 review feedback
-32b25f332b139e728d0d94fc7493b7f3e46433ba  fix(review): address PR #986 review feedback
-27637e4abe95eb9ca64452782d050c423c9f9c13  fix(review): address PR #986 review feedback
