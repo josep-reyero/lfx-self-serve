@@ -181,8 +181,15 @@ export class SurveyService {
       creator_name: effectiveName || '',
     };
 
-    const sanitizedPayload = logger.sanitize({ surveyData: enrichedData });
-    logger.debug(req, 'create_survey', 'Creating survey payload', sanitizedPayload);
+    // Log only safe, non-PII survey metadata. logger.sanitize redacts top-level keys only, so the
+    // nested creator_id / creator_username LFID values (PII) would leak if we logged enrichedData.
+    logger.debug(req, 'create_survey', 'Creating survey payload', {
+      survey_monkey_id: enrichedData.survey_monkey_id,
+      committee_uid: enrichedData.committee_uid,
+      send_immediately: enrichedData.send_immediately,
+      is_project_survey: enrichedData.is_project_survey,
+      has_creator: !!enrichedData.creator_id,
+    });
 
     const newSurvey = await this.microserviceProxy.proxyRequest<Survey>(req, 'LFX_V2_SERVICE', '/surveys', 'POST', undefined, enrichedData, {
       ['X-Sync']: 'true',
