@@ -288,7 +288,7 @@ export class ProjectService {
   /**
    * Fetches a single project by ID
    */
-  public async getProjectById(req: Request, uid: string, access: boolean = true): Promise<Project> {
+  public async getProjectById(req: Request, uid: string, access: boolean = true, includeMeetingCoordinator: boolean = false): Promise<Project> {
     const project = await this.microserviceProxy.proxyRequest<Project>(req, 'LFX_V2_SERVICE', `/projects/${uid}`, 'GET');
 
     if (!project) {
@@ -299,9 +299,33 @@ export class ProjectService {
       });
     }
 
-    // Add writer access field to the project
     if (access) {
-      return await this.accessCheckService.addAccessToResource(req, project, 'project');
+      const writerProject = await this.accessCheckService.addAccessToResource(req, project, 'project');
+      // Skip meeting_coordinator check when already a writer — the guard allows writer OR
+      // meeting_coordinator, so the extra round trip can't change the outcome.
+      // Return the field as undefined (omitted) rather than false — false would be a
+      // false-negative assertion since the role was never actually checked for writers.
+      if (writerProject.writer) {
+        return writerProject;
+      }
+      // Only run the meeting_coordinator FGA check when the caller explicitly requests it.
+      // This field is consumed by exactly one branch of writer.guard.ts; running it on every
+      // GET /api/projects/:slug call would add a second sequential access-check round-trip
+      // for all non-writer callers (guards, components, etc.) that never read the field.
+      if (!includeMeetingCoordinator) {
+        return writerProject;
+      }
+      // checkSingleAccess never rejects: AccessCheckService.checkAccess catches upstream
+      // failures internally and falls back to `false` for every requested access (logging
+      // the error there). So a transient /access-check failure yields `false`, not a thrown
+      // error — fail-closed, which is the safe default for an access-control gate (a
+      // would-be coordinator is denied on an outage rather than wrongly admitted).
+      const isMeetingCoordinator = await this.accessCheckService.checkSingleAccess(req, {
+        resource: 'project',
+        id: project.uid,
+        access: 'meeting_coordinator',
+      });
+      return { ...writerProject, meetingCoordinator: isMeetingCoordinator };
     }
 
     return project;
@@ -377,7 +401,7 @@ export class ProjectService {
    * Fetches a single project by slug using NATS for slug resolution
    * First resolves slug to ID via NATS, then fetches project data
    */
-  public async getProjectBySlug(req: Request, projectSlug: string): Promise<Project> {
+  public async getProjectBySlug(req: Request, projectSlug: string, includeMeetingCoordinator: boolean = false): Promise<Project> {
     const natsResult = await this.getProjectIdBySlug(req, projectSlug);
 
     if (!natsResult.exists || !natsResult.uid) {
@@ -389,7 +413,7 @@ export class ProjectService {
     }
 
     // Now fetch the project using the resolved ID
-    return this.getProjectById(req, natsResult.uid);
+    return this.getProjectById(req, natsResult.uid, true, includeMeetingCoordinator);
   }
 
   public async getProjectSettings(req: Request, uid: string): Promise<ProjectSettings> {

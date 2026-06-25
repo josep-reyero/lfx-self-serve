@@ -11,6 +11,19 @@ export interface Project {
   name: string;
   /** Response-only — write access for the current user. */
   writer?: boolean;
+  /**
+   * Response-only — present only when the caller requested the meeting_coordinator check
+   * (`?meeting_coordinator=true`) and the user is not already a writer.
+   *
+   * - `true`      — user holds the `meeting_coordinator` role on this project.
+   * - `false`     — fail-closed: either the check ran clean and found no role, OR the
+   *   `/access-check` lookup failed transiently (AccessCheckService falls back to `false`
+   *   for every requested access). Treated as "no coordinator access" by callers, which is
+   *   the safe default for an access-control gate.
+   * - `undefined` — check was not requested or was skipped because the user is already a
+   *   writer (the role can't change the writer-OR-coordinator outcome, so it isn't run).
+   */
+  meetingCoordinator?: boolean;
   public: boolean;
   parent_uid: string;
   stage: ProjectStage | string;
