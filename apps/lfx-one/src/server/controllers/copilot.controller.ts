@@ -104,7 +104,9 @@ export class CopilotController {
       });
     } catch (error) {
       if (clientDisconnected) return;
-      logger.error(req, 'copilot_chat', startTime, error, { user_id: userId });
+      // Do not log the raw LFID username: it is identity PII and the logger does not
+      // redact `user_id`. The session marker is enough to correlate the failure.
+      logger.error(req, 'copilot_chat', startTime, error, { has_session: !!validSessionId });
       sendEvent('error', 'Something went wrong. Please try again.');
     } finally {
       this.activeStreams.delete(res);

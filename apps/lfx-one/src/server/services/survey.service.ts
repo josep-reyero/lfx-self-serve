@@ -7,11 +7,11 @@ import { CreateSurveyRequest, MySurveyResponse, QueryServiceResponse, Survey, Su
 import { getSurveyDisplayStatus } from '@lfx-one/shared/utils';
 import { Request } from 'express';
 
-import { ResourceNotFoundError } from '../errors';
+import { ResourceNotFoundError, ServiceValidationError } from '../errors';
 import { pollEndpoint } from '../helpers/poll-endpoint.helper';
 import { fetchAllQueryResources } from '../helpers/query-service.helper';
 import { validateAndSanitizeUrl } from '../helpers/url-validation';
-import { getEffectiveEmail, getUsernameFromAuth, stripAuthPrefix } from '../utils/auth-helper';
+import { getEffectiveEmail, getEffectiveName, getEffectiveUsername, getUsernameFromAuth, stripAuthPrefix } from '../utils/auth-helper';
 import { ETagService } from './etag.service';
 import { logger } from './logger.service';
 import { MicroserviceProxyService } from './microservice-proxy.service';
@@ -163,13 +163,22 @@ export class SurveyService {
    * Creates a new survey
    */
   public async createSurvey(req: Request, surveyData: CreateSurveyRequest): Promise<Survey> {
-    // Enrich creator fields from the OIDC session (not expected from the frontend)
-    const user = req.oidc?.user;
+    // Enrich creator fields from the effective identity (not expected from the frontend).
+    // Use the effective identity so that during impersonation the survey is attributed to
+    // the target user, not the impersonator, keeping audit/ownership semantics correct.
+    const effectiveUsername = getEffectiveUsername(req);
+    if (!effectiveUsername) {
+      throw ServiceValidationError.forField('creator_id', 'Unable to resolve the authenticated user identity', {
+        operation: 'create_survey',
+        service: 'survey',
+      });
+    }
+    const effectiveName = getEffectiveName(req);
     const enrichedData: CreateSurveyRequest = {
       ...surveyData,
-      creator_id: (user?.['https://sso.linuxfoundation.org/claims/username'] as string) || '',
-      creator_username: (user?.['nickname'] as string) || (user?.['name'] as string) || '',
-      creator_name: (user?.['name'] as string) || '',
+      creator_id: effectiveUsername,
+      creator_username: effectiveName || effectiveUsername,
+      creator_name: effectiveName || '',
     };
 
     const sanitizedPayload = logger.sanitize({ surveyData: enrichedData });
