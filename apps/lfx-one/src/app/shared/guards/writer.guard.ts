@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 import { inject } from '@angular/core';
 import { ActivatedRouteSnapshot, CanActivateFn, Router } from '@angular/router';
+import { Project } from '@lfx-one/shared/interfaces';
 import { catchError, map, of, switchMap } from 'rxjs';
 
 import { CommitteeService } from '../services/committee.service';
@@ -62,16 +63,32 @@ export const writerGuard: CanActivateFn = (route: ActivatedRouteSnapshot) => {
   // Committee writers can create meetings associated with their committee. Only applicable
   // when a committee_uid is present in the route query params (set by committee-meetings
   // .component's createMeetingQueryParams()) and the route is the meetings feature.
+  //
+  // The committee MUST belong to the guarded project: committee.writer is a per-committee
+  // relation, so without this check a writer of committee A on project A could craft
+  // ?project=project-b&committee_uid=committee-a and be granted project B's create flow.
+  // Verify the committee's project linkage against the guarded project (by uid when the
+  // project read succeeded, else by slug) and fail closed when it can't be confirmed.
+  //
   // Note: CommitteeService.getCommittee has a tap() that sets the committee signal as a
   // side-effect. This is acceptable here — on deny the navigation is blocked before any
   // committee view renders; on allow the committee page overwrites it.
-  const committeeFallback$ = () =>
-    committeeUid && writeFeature === 'meetings'
-      ? committeeService.getCommittee(committeeUid).pipe(
-          map((committee) => (committee?.writer === true ? (true as const) : deny())),
-          catchError(() => of(deny()))
-        )
-      : of(deny());
+  const committeeFallback$ = (project: Project | null) => {
+    if (!committeeUid || writeFeature !== 'meetings') {
+      return of(deny());
+    }
+    return committeeService.getCommittee(committeeUid).pipe(
+      map((committee) => {
+        if (committee?.writer !== true) {
+          return deny();
+        }
+        // Confirm the committee is associated with the project being guarded.
+        const belongsToProject = project ? committee.project_uid === project.uid : committee.project_slug === slug;
+        return belongsToProject ? (true as const) : deny();
+      }),
+      catchError(() => of(deny()))
+    );
+  };
 
   return projectService.getProject(slug, false, { meetingCoordinator: writeFeature === 'meetings' }).pipe(
     switchMap((project) => {
@@ -79,7 +96,7 @@ export const writerGuard: CanActivateFn = (route: ActivatedRouteSnapshot) => {
       // member with no direct project-level OpenFGA relation hits this path, so fall through
       // to the committee-writer check before denying rather than short-circuiting.
       if (project === null) {
-        return committeeFallback$();
+        return committeeFallback$(null);
       }
       if (project.writer === true) {
         return of(true as const);
@@ -88,7 +105,7 @@ export const writerGuard: CanActivateFn = (route: ActivatedRouteSnapshot) => {
       if (writeFeature === 'meetings' && project.meetingCoordinator === true) {
         return of(true as const);
       }
-      return committeeFallback$();
+      return committeeFallback$(project);
     })
   );
 };

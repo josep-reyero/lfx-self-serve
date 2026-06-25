@@ -28,6 +28,7 @@
  *   S16 Route guard — writerGuard denies non-writer committee member
  *   S17 Meetings dashboard — Create Meeting CTA visible to meeting coordinator
  *   S18 Meetings dashboard — Create Meeting CTA hidden for non-writer non-coordinator
+ *   S19 Route guard — writerGuard denies committee_uid from a different project
  *
  * Failure messages include the persona × lens × page combination so CI output
  * pinpoints the exact regression without digging through traces.
@@ -581,8 +582,16 @@ async function stubProjectApiNotFound(page: Page, slug: string): Promise<void> {
   );
 }
 
-/** Stubs GET /api/committees/:uid with the given writer flag (or a 403 when committee is null). */
-async function stubCommitteeApi(page: Page, uid: string, committee: { writer: boolean } | null): Promise<void> {
+/**
+ * Stubs GET /api/committees/:uid (or a 403 when committee is null). project_uid/project_slug
+ * default to the guarded mock project so the writerGuard committee-ownership check passes;
+ * override them to exercise the cross-project mismatch denial.
+ */
+async function stubCommitteeApi(
+  page: Page,
+  uid: string,
+  committee: { writer: boolean; project_uid?: string; project_slug?: string } | null
+): Promise<void> {
   await page.route(`**/api/committees/${uid}*`, (route) => {
     if (committee === null) {
       return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ message: 'forbidden' }) });
@@ -590,7 +599,13 @@ async function stubCommitteeApi(page: Page, uid: string, committee: { writer: bo
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ uid, name: 'Test Committee', writer: committee.writer }),
+      body: JSON.stringify({
+        uid,
+        name: 'Test Committee',
+        writer: committee.writer,
+        project_uid: committee.project_uid ?? MOCK_PROJECT_UID,
+        project_slug: committee.project_slug ?? MOCK_PROJECT_SLUG,
+      }),
     });
   });
 }
@@ -677,6 +692,27 @@ test.describe('S16: Route guard — writerGuard denies non-writer committee memb
     skipWhenAuthMissing(page);
 
     await expect(page, 'committee non-writer should be redirected to /project/overview').toHaveURL(/\/project\/overview/, {
+      timeout: ELEMENT_TIMEOUT,
+    });
+  });
+});
+
+test.describe('S19: Route guard — writerGuard denies committee_uid from a different project', () => {
+  test('committee.writer=true but committee belongs to another project is redirected (no cross-project grant)', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    // Project read succeeds (viewer) but writer=false; committee is writeable yet linked to a DIFFERENT project.
+    await stubProjectApi(page, MOCK_PROJECT_SLUG, false, false);
+    await stubCommitteeApi(page, MOCK_COMMITTEE_UID, { writer: true, project_uid: 'other-project-uid', project_slug: 'other-project' });
+    await setPersonaCookie(page, ['contributor']);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings/create?project=${MOCK_PROJECT_SLUG}&committee_uid=${MOCK_COMMITTEE_UID}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(page, 'committee from a different project must NOT grant access to this project').toHaveURL(/\/project\/overview/, {
       timeout: ELEMENT_TIMEOUT,
     });
   });
