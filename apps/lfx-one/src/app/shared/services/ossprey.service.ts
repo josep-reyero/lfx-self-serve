@@ -25,7 +25,14 @@ export class OsspreyService {
       if (params.sortBy) httpParams = httpParams.set('sortBy', params.sortBy);
       if (params.sortDir) httpParams = httpParams.set('sortDir', params.sortDir);
     }
-    return this.http.get<OsspreyPackagesResponse>('/api/ossprey/packages', { params: httpParams });
+    return this.http.get<OsspreyPackagesResponse>('/api/ossprey/packages', { params: httpParams }).pipe(
+      catchError((err) => {
+        console.error('[OsspreyService] getPackages failed', { status: err?.status, message: err?.message });
+        // Return a stable empty result so callers render an empty state rather
+        // than terminating their subscription on a 403/502/network error.
+        return of<OsspreyPackagesResponse>({ packages: [], total: 0 });
+      })
+    );
   }
 
   public getStewardName(id: string): string {
