@@ -5,6 +5,7 @@ import { CDP_CONFIG } from '@lfx-one/shared/constants';
 import { isEmailShape } from '@lfx-one/shared/utils';
 import {
   CdpCreateIdentityRequest,
+  CdpCreateMemberRequest,
   CdpIdentity,
   CdpIdentityRaw,
   CdpOrganization,
@@ -15,11 +16,12 @@ import {
   ProjectAffiliationPatchBody,
   WorkExperienceEntry,
 } from '@lfx-one/shared/interfaces';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { Request } from 'express';
 
 import { CDP_PLATFORM_ICONS } from '@lfx-one/shared/constants';
-import { MicroserviceError } from '../errors';
+import { MicroserviceError, ServiceValidationError } from '../errors';
+import { getEffectiveName, getEffectiveUsername, usernameMatches } from '../utils/auth-helper';
 import { logger } from './logger.service';
 
 /**
@@ -135,21 +137,80 @@ export class CdpService {
   }
 
   /**
-   * Resolve an LFID to a CDP member ID
+   * Resolve an LFID to a CDP member ID, creating the member if CDP has none yet.
+   *
+   * A successful resolve can legitimately return no member ID (CDP has never seen
+   * this user). In that case we create a member seeded with the user's LFID identity
+   * so downstream identity/work/affiliation calls have a target.
    */
   public async resolveMember(req: Request | undefined, lfids: string[], emails?: string[]): Promise<string> {
-    const token = await this.generateToken(req);
-    const resolveUrl = `${this.cdpApiUrl}${CDP_CONFIG.ENDPOINTS.RESOLVE_MEMBER}`;
-    const requestId = randomUUID();
-
-    logger.debug(req, 'resolve_cdp_member', 'Resolving CDP member', { lfids, request_id: requestId });
-
-    const body: { lfids: string[]; emails?: string[] } = { lfids };
-    if (emails?.length) {
-      body.emails = emails;
+    // Guard up front: an empty/missing LFID would seed createMember with undefined values
+    // and surface as a confusing upstream 4xx/5xx. Fail fast with a clear validation error.
+    if (!lfids?.length || !lfids[0]) {
+      throw ServiceValidationError.forField('lfids', 'At least one LFID is required to resolve a CDP member', {
+        operation: 'resolve_cdp_member',
+        service: 'cdp_service',
+      });
     }
 
-    const response = await fetch(resolveUrl, {
+    const resolved = await this.resolveMemberId(req, lfids, emails);
+    if (resolved) {
+      return resolved;
+    }
+
+    // CDP responded OK but has no member for this user yet — create one seeded with
+    // the user's LFID identity so subsequent identity/work/affiliation calls have a target.
+    const lfid = lfids[0];
+    // The seed identity's LFID and the display name must describe the SAME principal.
+    // getEffectiveName()/getEffectiveUsername() are impersonation-aware and return the
+    // impersonated target, while the LFID passed here is derived from the raw OIDC user
+    // (the impersonator during Admin Mode). Only adopt the effective name when its
+    // username actually matches the seed LFID; otherwise fall back to the LFID so we
+    // never mis-seed CDP with one user's identity under another user's display name.
+    const effectiveUsername = req ? getEffectiveUsername(req) : null;
+    const effectiveName = req ? getEffectiveName(req) : null;
+    const displayName = effectiveName && effectiveUsername && usernameMatches(effectiveUsername, lfid) ? effectiveName : lfid;
+    const seedIdentity: CdpCreateIdentityRequest = {
+      value: lfid,
+      platform: 'lfid',
+      type: 'username',
+      source: 'lfxOne',
+      verified: true,
+      verifiedBy: lfid,
+    };
+
+    logger.info(req, 'resolve_cdp_member', 'No CDP member resolved; creating new member', { lfid_hash: CdpService.redactIdentifier(lfid) });
+
+    try {
+      return await this.createMember(req, displayName, [seedIdentity]);
+    } catch (error) {
+      // 409 = the LFID identity already belongs to a member (e.g. a concurrent request
+      // created it between our resolve and create). Re-resolve and return the existing
+      // member instead of surfacing the conflict to the user.
+      if (error instanceof MicroserviceError && error.statusCode === 409) {
+        const retry = await this.resolveMemberId(req, lfids, emails);
+        if (retry) {
+          logger.info(req, 'resolve_cdp_member', 'Recovered existing member after create conflict', { lfid_hash: CdpService.redactIdentifier(lfid) });
+          return retry;
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Create a new CDP member seeded with the given identities
+   */
+  public async createMember(req: Request | undefined, displayName: string, identities: CdpCreateIdentityRequest[]): Promise<string> {
+    const token = await this.generateToken(req);
+    const url = `${this.cdpApiUrl}${CDP_CONFIG.ENDPOINTS.CREATE_MEMBER}`;
+    const requestId = randomUUID();
+
+    logger.debug(req, 'create_cdp_member', 'Creating CDP member', { identity_count: identities.length, request_id: requestId });
+
+    const body: CdpCreateMemberRequest = { displayName, identities };
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -162,14 +223,23 @@ export class CdpService {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new MicroserviceError(`CDP member resolve failed: ${response.statusText}`, response.status, 'CDP_RESOLVE_ERROR', {
-        operation: 'resolve_cdp_member',
+      throw new MicroserviceError(`CDP member create failed: ${response.statusText}`, response.status, 'CDP_MEMBER_CREATE_ERROR', {
+        operation: 'create_cdp_member',
         service: 'cdp_service',
         errorBody: errorText,
       });
     }
 
     const data = (await response.json()) as CdpResolveResponse;
+    if (!data.memberId) {
+      // A 2xx with no member ID would silently reintroduce the empty-reads bug
+      // this flow exists to prevent — fail loudly instead.
+      throw new MicroserviceError('CDP member create returned no member ID', 502, 'CDP_MEMBER_CREATE_ERROR', {
+        operation: 'create_cdp_member',
+        service: 'cdp_service',
+      });
+    }
+
     return data.memberId;
   }
 
@@ -835,6 +905,58 @@ export class CdpService {
   }
 
   /**
+   * Resolve an LFID/emails to a CDP member ID via CDP's resolve endpoint.
+   * Returns undefined when CDP has no member for the request — CDP signals this with a
+   * 404 (NOT_FOUND / "Member not found"), which we treat as "no member" rather than an
+   * upstream failure. Any other non-2xx status throws.
+   */
+  private async resolveMemberId(req: Request | undefined, lfids: string[], emails?: string[]): Promise<string | undefined> {
+    const token = await this.generateToken(req);
+    const resolveUrl = `${this.cdpApiUrl}${CDP_CONFIG.ENDPOINTS.RESOLVE_MEMBER}`;
+    const requestId = randomUUID();
+
+    logger.debug(req, 'resolve_cdp_member', 'Resolving CDP member', { lfid_hashes: lfids.map((id) => CdpService.redactIdentifier(id)), request_id: requestId });
+
+    const body: { lfids: string[]; emails?: string[] } = { lfids };
+    if (emails?.length) {
+      body.emails = emails;
+    }
+
+    const response = await fetch(resolveUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-LFX-Request-ID': requestId,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      // CDP returns 404 (NOT_FOUND / "Member not found") when no member matches the
+      // LFID/emails — treat as "no member" so resolveMember creates one. Other statuses
+      // are genuine upstream failures.
+      if (response.status === 404) {
+        logger.debug(req, 'resolve_cdp_member', 'No CDP member found; will create', {
+          lfid_hashes: lfids.map((id) => CdpService.redactIdentifier(id)),
+          request_id: requestId,
+        });
+        return undefined;
+      }
+      throw new MicroserviceError(`CDP member resolve failed: ${response.statusText}`, response.status, 'CDP_RESOLVE_ERROR', {
+        operation: 'resolve_cdp_member',
+        service: 'cdp_service',
+        errorBody: errorText,
+      });
+    }
+
+    const data = (await response.json()) as CdpResolveResponse;
+    return data.memberId || undefined;
+  }
+
+  /**
    * Map our interface field names (startDate/endDate) to CDP PATCH field names (dateStart/dateEnd)
    */
   private mapAffiliationsToCdpFormat(affiliations: ProjectAffiliationPatchBody['affiliations']): CdpProjectAffiliationPatchEntry[] {
@@ -854,5 +976,15 @@ export class CdpService {
     const date = new Date(isoDate);
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     return `${months[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+  }
+
+  /**
+   * Produce a stable, non-reversible correlation token for an identity value (LFID/username).
+   * LFIDs/usernames are identity PII and the logger does not redact these metadata keys, so we
+   * log a short SHA-256 prefix instead — enough to correlate log lines for the same user without
+   * persisting the raw identifier.
+   */
+  private static redactIdentifier(value: string): string {
+    return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 12);
   }
 }
