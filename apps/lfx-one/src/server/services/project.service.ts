@@ -122,7 +122,7 @@ import FormData from 'form-data';
 import { ResourceNotFoundError, ServiceValidationError } from '../errors';
 import { pollEndpoint } from '../helpers/poll-endpoint.helper';
 import { fetchAllQueryResources } from '../helpers/query-service.helper';
-import { cleanUserDisplayName } from '../utils/auth-helper';
+import { cleanUserDisplayName, usernameMatches } from '../utils/auth-helper';
 import { AccessCheckService } from './access-check.service';
 import { ETagService } from './etag.service';
 import { logger } from './logger.service';
@@ -444,10 +444,15 @@ export class ProjectService {
       }
     }
 
-    // Some users stored in settings pre-date username normalization and have an empty username.
-    // Match by email as a fallback so edits/removals work for those users too.
+    // Match a stored grant against the caller's target identifier. Three cases, in order:
+    // 1. Exact / prefix-insensitive username match. During the LFID migration, settings may still
+    //    store `auth0|<lfid>` while `backendIdentifier` is the bare LFID (or vice versa), so compare
+    //    with `usernameMatches`, which strips the `auth0|` provider prefix on both sides. Without this
+    //    a remove/update by email could leave the legacy `auth0|...` grant behind (orphaned access)
+    //    or append a duplicate LFID grant beside it.
+    // 2. Empty stored username + matching email — users that pre-date username normalization.
     const matchesUser = (u: { username?: string; email?: string }): boolean => {
-      if (u.username && u.username === backendIdentifier) return true;
+      if (u.username && usernameMatches(backendIdentifier, u.username)) return true;
       if (!u.username && originalEmail && u.email?.toLowerCase() === originalEmail) return true;
       return false;
     };
@@ -671,8 +676,11 @@ export class ProjectService {
           });
         }
 
-        // Extract username from JSON success response or JSON string
-        username = typeof parsed === 'string' ? parsed : parsed.username;
+        // Extract username from JSON success response or JSON string. During the LFID migration the
+        // resolver may still return only `{ sub }`; fall back to it so email-based permission edits
+        // resolve to an identifier instead of throwing NOT_FOUND. matchesUser strips the auth prefix
+        // so an `auth0|<lfid>` sub still matches a stored LFID grant.
+        username = typeof parsed === 'string' ? parsed : parsed.username || parsed.sub;
       } catch (parseError) {
         // Re-throw ResourceNotFoundError as-is
         if (parseError instanceof ResourceNotFoundError) {
