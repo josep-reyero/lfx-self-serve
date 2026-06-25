@@ -54,6 +54,9 @@ export class MyDonationsComponent {
   protected readonly recurringDonations: Signal<RecurringDonation[]> = this.initRecurringDonations();
   private readonly paymentMethod: Signal<PaymentMethod | null> = this.initPaymentMethod();
   protected readonly paymentMethods = computed(() => (this.paymentMethod() ? [this.paymentMethod()!] : []));
+  // Tracks whether the first donation-history request has settled, so the table can distinguish
+  // "still loading" from a genuinely empty account and avoid flashing the empty state on every visit.
+  protected readonly donationHistoryLoaded = signal(false);
   private readonly donationHistoryState: Signal<MyDonationsResponse> = this.initDonationHistory();
   protected readonly donationHistory = computed(() => this.donationHistoryState().data);
   protected readonly donationHistoryHasMore = computed(() => this.donationHistoryState().data.length < this.donationHistoryState().total);
@@ -133,12 +136,12 @@ export class MyDonationsComponent {
   private initStatCards(): Signal<StatCardItem[]> {
     return computed<StatCardItem[]>(() => {
       const stats = this.stats();
-      const recurringLabel = `Active Recurring · ${stats.activeRecurringCount} subscription${stats.activeRecurringCount === 1 ? '' : 's'}`;
+      const recurringValue = `${formatCurrency(stats.activeRecurringAmount)}/mo · ${stats.activeRecurringCount} active`;
 
       return [
         { value: formatCurrency(stats.totalDonated), label: 'Total Donated · All time', icon: 'fa-light fa-hand-holding-heart', iconContainerClass: 'bg-blue-100 text-blue-600' },
         { value: stats.initiativesSupported, label: 'Initiatives Supported', icon: 'fa-light fa-seedling', iconContainerClass: 'bg-emerald-100 text-emerald-600' },
-        { value: `${formatCurrency(stats.activeRecurringAmount)}/mo`, label: recurringLabel, icon: 'fa-light fa-arrows-rotate', iconContainerClass: 'bg-violet-100 text-violet-600' },
+        { value: recurringValue, label: 'Active Recurring', icon: 'fa-light fa-arrows-rotate', iconContainerClass: 'bg-violet-100 text-violet-600' },
       ];
     });
   }
@@ -158,7 +161,10 @@ export class MyDonationsComponent {
       toObservable(this.donationHistoryOffset).pipe(
         switchMap((offset) => this.crowdfundingService.getMyDonations({ pageSize: DEFAULT_CROWDFUNDING_PAGE_SIZE, offset })),
         scan((acc, curr) => (curr.offset === 0 ? curr : { ...curr, data: [...acc.data, ...curr.data] }), EMPTY_MY_DONATIONS),
-        tap(() => this.loadingMore.set(false))
+        tap(() => {
+          this.loadingMore.set(false);
+          this.donationHistoryLoaded.set(true);
+        })
       ),
       { initialValue: EMPTY_MY_DONATIONS }
     );

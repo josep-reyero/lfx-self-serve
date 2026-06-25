@@ -42,6 +42,7 @@
       <h2 class="text-sm font-bold text-gray-900">Donation History</h2>
       <lfx-donation-history-table
         [items]="donationHistory()"
+        [loaded]="donationHistoryLoaded()"
         [hasMore]="donationHistoryHasMore()"
         [loadingMore]="loadingMore()"
         [exploreUrl]="crowdfundingUrl"
