@@ -26,6 +26,8 @@
  *   S14 Route guard — writerGuard denial encodes _notice and shows Access Denied toast
  *   S15 Route guard — writerGuard allows committee writer (committee_uid + null project read)
  *   S16 Route guard — writerGuard denies non-writer committee member
+ *   S17 Meetings dashboard — Create Meeting CTA visible to meeting coordinator
+ *   S18 Meetings dashboard — Create Meeting CTA hidden for non-writer non-coordinator
  *
  * Failure messages include the persona × lens × page combination so CI output
  * pinpoints the exact regression without digging through traces.
@@ -677,6 +679,50 @@ test.describe('S16: Route guard — writerGuard denies non-writer committee memb
     await expect(page, 'committee non-writer should be redirected to /project/overview').toHaveURL(/\/project\/overview/, {
       timeout: ELEMENT_TIMEOUT,
     });
+  });
+});
+
+// ─── S17–S18: meetings dashboard Create Meeting CTA (coordinator entry point) ──
+// The CTA gate uses canWriteMeetings() (writer OR meeting_coordinator), not canWrite().
+// Regression for the dashboard entry point a meeting coordinator must reach to open the
+// guarded create route — the guard fix alone is insufficient if the CTA stays hidden.
+
+test.describe('S17: Meetings dashboard — Create Meeting CTA visible to meeting coordinator', () => {
+  test('contributor with meetingCoordinator=true (writer=false) sees the Create Meeting button', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    // canWriteMeetings() fetches the project with ?meeting_coordinator=true.
+    await stubProjectApi(page, MOCK_PROJECT_SLUG, false, true);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings?project=${MOCK_PROJECT_SLUG}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(
+      page.getByTestId('meeting-create-button'),
+      'persona=contributor meetingCoordinator=true should see the Create Meeting CTA'
+    ).toBeVisible({ timeout: ELEMENT_TIMEOUT });
+  });
+});
+
+test.describe('S18: Meetings dashboard — Create Meeting CTA hidden for non-writer non-coordinator', () => {
+  test('contributor (writer=false, meetingCoordinator=false) does NOT see the Create Meeting button', async ({ page }) => {
+    await stubPersona(page, ['contributor']);
+    await stubNavLensItems(page, 'project');
+    await stubProjectApi(page, MOCK_PROJECT_SLUG, false, false);
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await page.goto(`/project/meetings?project=${MOCK_PROJECT_SLUG}`, { waitUntil: 'domcontentloaded' });
+    skipWhenAuthMissing(page);
+
+    await expect(
+      page.getByTestId('meeting-create-button'),
+      'persona=contributor canWriteMeetings=false should NOT see the Create Meeting CTA'
+    ).toHaveCount(0, { timeout: ELEMENT_TIMEOUT });
   });
 });
 
