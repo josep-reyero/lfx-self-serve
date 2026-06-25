@@ -36,13 +36,13 @@ export class OrgRoleGrantsService {
   }
 
   /** Spec 022 — single source of truth for the caller's access-aware org universe; mirrors `01-my-orgs-by-access.ipynb` per data-model.md D-001…D-005. Memoized per username for `ORG_ACCESS_AWARE_CACHE_TTL_MS` so repeated typeahead requests filter in-memory; only successful resolutions are cached. */
-  public async getAccessAwareOrgs(req: Request, username: string): Promise<AccessAwareOrgsResult> {
+  public async getAccessAwareOrgs(req: Request, username: string, fallbackIdentifier?: string | null): Promise<AccessAwareOrgsResult> {
     const cached = OrgRoleGrantsService.accessCache.get(username);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.value;
     }
 
-    const result = await this.computeAccessAwareOrgs(req, username);
+    const result = await this.computeAccessAwareOrgs(req, username, fallbackIdentifier);
 
     // Cache only successful, filter-safe resolutions. Never cache upstream failures (they retry next
     // request) or unsafe usernames (avoids attacker-varied keys growing the map).
@@ -52,9 +52,18 @@ export class OrgRoleGrantsService {
     return result;
   }
 
-  /** Public wire-shape wrapper around `getAccessAwareOrgs` for `GET /api/orgs/me/role-grants`. */
-  public async getRoleGrants(req: Request, username: string): Promise<RoleGrantsResponse> {
-    const { resolved, loadedAt } = await this.getAccessAwareOrgs(req, username);
+  /**
+   * Public wire-shape wrapper around `getAccessAwareOrgs` for `GET /api/orgs/me/role-grants`.
+   *
+   * `username` is the canonical LFID username — it keys the cache and is echoed in the response.
+   * `fallbackIdentifier` (optional) is the legacy Auth0 sub used as a *migration-window* match
+   * key: `b2b_org_settings` docs indexed before the LFID migration store `member:auth0|...` tags
+   * and `data.*[].username` in the prefixed form, so without it an ED/admin whose org settings
+   * are still indexed under the Auth0 sub would resolve to zero grants and lose Admin Mode access.
+   * Both keys are queried and classified; the LFID is always returned to callers.
+   */
+  public async getRoleGrants(req: Request, username: string, fallbackIdentifier?: string | null): Promise<RoleGrantsResponse> {
+    const { resolved, loadedAt } = await this.getAccessAwareOrgs(req, username, fallbackIdentifier);
     return this.toRoleGrantsResponse(resolved, username, loadedAt);
   }
 
@@ -73,7 +82,7 @@ export class OrgRoleGrantsService {
     cache.set(username, { value, expiresAt: now + ORG_ACCESS_AWARE_CACHE_TTL_MS });
   }
 
-  private async computeAccessAwareOrgs(req: Request, username: string): Promise<AccessAwareOrgsResult> {
+  private async computeAccessAwareOrgs(req: Request, username: string, fallbackIdentifier?: string | null): Promise<AccessAwareOrgsResult> {
     const loadedAt = new Date().toISOString();
     const empty: AccessAwareOrgsResult = {
       resolved: new Map(),
@@ -90,6 +99,15 @@ export class OrgRoleGrantsService {
       return empty;
     }
 
+    // Migration window: match on the LFID username AND, when present, the legacy Auth0 sub.
+    // Docs indexed before the LFID migration carry `member:auth0|...` tags and prefixed
+    // `data.*[].username`, so matching on the LFID alone would drop those grants. The fallback
+    // is only included if it is itself filter-safe and distinct from the LFID username.
+    const matchIdentifiers = new Set<string>([username]);
+    if (fallbackIdentifier && fallbackIdentifier !== username && isFilterSafeUsername(fallbackIdentifier)) {
+      matchIdentifiers.add(fallbackIdentifier);
+    }
+
     let settingsResponse: QueryServiceResponse<B2bOrgSettingsDoc>;
     try {
       settingsResponse = await this.microserviceProxy.proxyRequest<QueryServiceResponse<B2bOrgSettingsDoc>>(req, 'LFX_V2_SERVICE', '/query/resources', 'GET', {
@@ -97,9 +115,11 @@ export class OrgRoleGrantsService {
         // Spec 002 / member-service v0.7.0: settings are indexed with a `member:<username>` tag (the
         // union of accepted writers + auditors — b2b_org_settings.go Tags() → TagPrefixMember). The
         // query-service matches these via the `tags` param (the legacy `filters_or: writers.username:`
-        // form matches nothing — verified against dev). Writer-vs-auditor is classified from the
-        // flattened `data.members[]` shape (falling back to legacy `data.writers[]`/`data.auditors[]`) below.
-        tags: [`member:${username}`],
+        // form matches nothing — verified against dev). During the LFID migration we pass both the
+        // LFID username and the legacy Auth0 sub so docs indexed under either key still match.
+        // Writer-vs-auditor is classified from the flattened `data.members[]` shape (falling back to
+        // legacy `data.writers[]`/`data.auditors[]`) below.
+        tags: Array.from(matchIdentifiers, (id) => `member:${id}`),
         per_page: ORG_ROLE_GRANTS_HARD_CAP,
       });
     } catch (error) {
@@ -107,7 +127,7 @@ export class OrgRoleGrantsService {
       return { ...empty, upstreamFailed: true };
     }
 
-    const { directWriters, directAuditors } = this.partitionDirectGrants(settingsResponse, username);
+    const { directWriters, directAuditors } = this.partitionDirectGrants(settingsResponse, matchIdentifiers);
     if (directWriters.size === 0 && directAuditors.size === 0) {
       return { resolved: new Map(), orgDocByUid: new Map(), upstreamFailed: false, loadedAt, username };
     }
@@ -139,7 +159,7 @@ export class OrgRoleGrantsService {
 
   private partitionDirectGrants(
     response: QueryServiceResponse<B2bOrgSettingsDoc> | null,
-    username: string
+    matchIdentifiers: Set<string>
   ): { directWriters: Set<string>; directAuditors: Set<string> } {
     const directWriters = new Set<string>();
     const directAuditors = new Set<string>();
@@ -150,7 +170,7 @@ export class OrgRoleGrantsService {
       const orgUid = this.extractUid(resource.id);
       if (!orgUid) continue;
 
-      const role = this.classifyDirectRole(resource.data, username);
+      const role = this.classifyDirectRole(resource.data, matchIdentifiers);
       if (role === 'writer') {
         directWriters.add(orgUid);
       } else if (role === 'auditor') {
@@ -167,12 +187,16 @@ export class OrgRoleGrantsService {
    * (member-service `b2bOrgSettingsIndexerView`). Only `accepted` entries count, and writer
    * wins over auditor when the caller appears as both (matches the indexer's writer-first dedupe).
    */
-  private classifyDirectRole(data: B2bOrgSettingsDoc | undefined, username: string): 'writer' | 'auditor' | null {
+  private classifyDirectRole(data: B2bOrgSettingsDoc | undefined, matchIdentifiers: Set<string>): 'writer' | 'auditor' | null {
+    // Migration window: an entry matches the caller when its username equals the LFID username
+    // OR the legacy Auth0 sub (docs indexed before the LFID migration store the prefixed sub).
+    const matchesCaller = (entryUsername: string | undefined): boolean => !!entryUsername && matchIdentifiers.has(entryUsername);
+
     const members = data?.members;
     if (members?.length) {
       let isAuditor = false;
       for (const entry of members) {
-        if (entry?.username !== username || entry?.invite_status !== 'accepted') continue;
+        if (!matchesCaller(entry?.username) || entry?.invite_status !== 'accepted') continue;
         if (entry.role === 'writer') return 'writer';
         if (entry.role === 'auditor') isAuditor = true;
       }
@@ -180,10 +204,10 @@ export class OrgRoleGrantsService {
     }
 
     // Legacy fallback for docs indexed before the members[] flatten.
-    if ((data?.writers ?? []).some((entry) => entry?.username === username && entry?.invite_status === 'accepted')) {
+    if ((data?.writers ?? []).some((entry) => matchesCaller(entry?.username) && entry?.invite_status === 'accepted')) {
       return 'writer';
     }
-    if ((data?.auditors ?? []).some((entry) => entry?.username === username && entry?.invite_status === 'accepted')) {
+    if ((data?.auditors ?? []).some((entry) => matchesCaller(entry?.username) && entry?.invite_status === 'accepted')) {
       return 'auditor';
     }
 

@@ -4,7 +4,7 @@
 import { B2bOrgIndexedDoc, GetOrgItemsParams, OrgItem, OrgItemsResponse, ResolvedOrgRole } from '@lfx-one/shared/interfaces';
 import { Request } from 'express';
 
-import { getEffectiveUsername } from '../utils/auth-helper';
+import { getEffectiveSub, getEffectiveUsername } from '../utils/auth-helper';
 import { logger } from './logger.service';
 import { OrgRoleGrantsService } from './org-role-grants.service';
 
@@ -38,7 +38,7 @@ export class OrgNavigationService {
       return { items: [], next_page_token: null, upstream_failed: true };
     }
 
-    const access = await this.orgRoleGrants.getAccessAwareOrgs(req, username);
+    const access = await this.orgRoleGrants.getAccessAwareOrgs(req, username, getEffectiveSub(req));
 
     if (access.resolved.size === 0 && access.orgDocByUid.size === 0) {
       return { items: [], next_page_token: null, upstream_failed: access.upstreamFailed, total: 0 };

@@ -154,7 +154,7 @@ export class FeatureFlagService {
         kind: 'user',
         name: user.name || '',
         email: user.email || '',
-        targetingKey: user.preferred_username || user.username || user.sub || '',
+        targetingKey: user['https://sso.linuxfoundation.org/claims/username'] || user.username || user.preferred_username || '',
       };
 
       await OpenFeature.setContext(userContext);
@@ -752,7 +752,7 @@ const userContext: EvaluationContext = {
   kind: 'user',
   name: user.name || '',
   email: user.email || '',
-  targetingKey: user.preferred_username || user.username || user.sub || '',
+  targetingKey: user['https://sso.linuxfoundation.org/claims/username'] || user.username || user.preferred_username || '',
 };
 ```
 
@@ -778,7 +778,7 @@ const userContext: EvaluationContext = {
 ```typescript
 const userContext: EvaluationContext = {
   kind: 'user',
-  targetingKey: user.sub,
+  targetingKey: user['https://sso.linuxfoundation.org/claims/username'] || user.username || user.preferred_username,
   name: user.name,
   email: user.email,
   // Custom attributes for targeting
@@ -1449,7 +1449,7 @@ See [Runtime Configuration Troubleshooting](../../runtime-configuration.md#troub
 
    ```typescript
    // targetingKey is required for user identification
-   targetingKey: user.preferred_username || user.username || user.sub || '';
+   targetingKey: user['https://sso.linuxfoundation.org/claims/username'] || user.username || user.preferred_username || '';
    ```
 
 2. **Incorrect Attribute Names:**

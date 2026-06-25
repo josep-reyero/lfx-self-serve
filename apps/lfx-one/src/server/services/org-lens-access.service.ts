@@ -16,7 +16,7 @@ import {
 import { Request } from 'express';
 
 import { MicroserviceError } from '../errors';
-import { getEffectiveUsername } from '../utils/auth-helper';
+import { getEffectiveSub, getEffectiveUsername } from '../utils/auth-helper';
 import { logger } from './logger.service';
 import { MicroserviceProxyService } from './microservice-proxy.service';
 import { OrgLensKeyContactsService } from './org-lens-key-contacts.service';
@@ -181,7 +181,7 @@ export class OrgLensAccessService {
     const username = getEffectiveUsername(req);
     if (!username) return false;
     try {
-      const grants = await this.roleGrants.getRoleGrants(req, username);
+      const grants = await this.roleGrants.getRoleGrants(req, username, getEffectiveSub(req));
       return grants.writers.includes(orgUid);
     } catch (error) {
       logger.warning(req, 'resolve_org_access_can_manage', 'Role-grants lookup failed; defaulting canManage=false', {
@@ -212,7 +212,7 @@ export class OrgLensAccessService {
 
     let isWriter: boolean;
     try {
-      const grants = await this.roleGrants.getRoleGrants(req, username);
+      const grants = await this.roleGrants.getRoleGrants(req, username, getEffectiveSub(req));
       isWriter = grants.writers.includes(orgUid);
     } catch (error) {
       // Couldn't verify (transient role-grants outage) — surface a retriable error, not a 403.
