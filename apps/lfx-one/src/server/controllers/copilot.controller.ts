@@ -8,7 +8,7 @@ import { ServiceValidationError } from '../errors';
 import { CopilotService } from '../services/copilot.service';
 import { logger } from '../services/logger.service';
 import { addShutdownHook, isShuttingDown } from '../utils/shutdown';
-import { getEffectiveSub } from '../utils/auth-helper';
+import { getEffectiveUsername } from '../utils/auth-helper';
 
 export class CopilotController {
   private readonly copilotService = new CopilotService();
@@ -40,7 +40,7 @@ export class CopilotController {
     const validSessionId = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : undefined;
     const validContext = context && typeof context === 'object' && !Array.isArray(context) ? context : undefined;
 
-    const userId = getEffectiveSub(req) || 'anonymous';
+    const userId = getEffectiveUsername(req) || 'anonymous';
 
     const startTime = logger.startOperation(req, 'copilot_chat', {
       has_session: !!validSessionId,
@@ -104,7 +104,9 @@ export class CopilotController {
       });
     } catch (error) {
       if (clientDisconnected) return;
-      logger.error(req, 'copilot_chat', startTime, error, { user_id: userId });
+      // Do not log the raw LFID username: it is identity PII and the logger does not
+      // redact `user_id`. The session marker is enough to correlate the failure.
+      logger.error(req, 'copilot_chat', startTime, error, { has_session: !!validSessionId });
       sendEvent('error', 'Something went wrong. Please try again.');
     } finally {
       this.activeStreams.delete(res);

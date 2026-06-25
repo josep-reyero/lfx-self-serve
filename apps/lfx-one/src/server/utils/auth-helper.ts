@@ -43,7 +43,7 @@ export async function getUsernameFromAuth(req: Request): Promise<string | null> 
   }
 
   // Fall back to OIDC claims for non-authelia tokens
-  return getEffectiveSub(req);
+  return getEffectiveUsername(req);
 }
 
 /**
@@ -67,21 +67,36 @@ export function getEffectiveEmail(req: Request): string | null {
 }
 
 /**
- * Gets the effective username for the current request context.
+ * Gets the effective LFID username for the current request context.
  * During impersonation, returns the target user's username from the impersonation session.
- * Otherwise returns the OIDC session user's username/nickname.
+ * Otherwise resolves the LFID username from the OIDC claims, preferring the declared
+ * LFID claim `https://sso.linuxfoundation.org/claims/username`, then the standard
+ * `username` / `preferred_username` claims, and only falling back to `nickname` last
+ * (some providers populate `nickname` with a display value rather than the LFID).
  */
 export function getEffectiveUsername(req: Request): string | null {
   if (req.appSession?.['impersonationUser']?.username) {
     return req.appSession['impersonationUser'].username as string;
   }
-  return (req.oidc?.user?.['nickname'] as string) || (req.oidc?.user?.['username'] as string) || null;
+  const user = req.oidc?.user;
+  return (
+    (user?.['https://sso.linuxfoundation.org/claims/username'] as string) ||
+    (user?.['username'] as string) ||
+    (user?.['preferred_username'] as string) ||
+    (user?.['nickname'] as string) ||
+    null
+  );
 }
 
 /**
  * Gets the effective sub (user ID) for the current request context.
  * During impersonation, returns the target user's sub from the impersonation session.
  * Otherwise returns the OIDC session user's sub.
+ *
+ * @deprecated Prefer getEffectiveUsername for APIs that accept the LFID username.
+ * The Auth0 sub claim is being phased out across backend APIs in favour of the LFID
+ * username. Only use this function for call sites whose upstream handler has not yet
+ * been migrated to accept a username.
  */
 export function getEffectiveSub(req: Request): string | null {
   if (req.appSession?.['impersonationUser']?.sub) {

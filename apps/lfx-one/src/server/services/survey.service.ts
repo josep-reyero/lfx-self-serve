@@ -7,11 +7,11 @@ import { CreateSurveyRequest, MySurveyResponse, QueryServiceResponse, Survey, Su
 import { getSurveyDisplayStatus } from '@lfx-one/shared/utils';
 import { Request } from 'express';
 
-import { ResourceNotFoundError } from '../errors';
+import { ResourceNotFoundError, ServiceValidationError } from '../errors';
 import { pollEndpoint } from '../helpers/poll-endpoint.helper';
 import { fetchAllQueryResources } from '../helpers/query-service.helper';
 import { validateAndSanitizeUrl } from '../helpers/url-validation';
-import { getEffectiveEmail, getUsernameFromAuth, stripAuthPrefix } from '../utils/auth-helper';
+import { getEffectiveEmail, getEffectiveName, getEffectiveUsername, getUsernameFromAuth, stripAuthPrefix } from '../utils/auth-helper';
 import { ETagService } from './etag.service';
 import { logger } from './logger.service';
 import { MicroserviceProxyService } from './microservice-proxy.service';
@@ -163,17 +163,33 @@ export class SurveyService {
    * Creates a new survey
    */
   public async createSurvey(req: Request, surveyData: CreateSurveyRequest): Promise<Survey> {
-    // Enrich creator fields from the OIDC session (not expected from the frontend)
-    const user = req.oidc?.user;
+    // Enrich creator fields from the effective identity (not expected from the frontend).
+    // Use the effective identity so that during impersonation the survey is attributed to
+    // the target user, not the impersonator, keeping audit/ownership semantics correct.
+    const effectiveUsername = getEffectiveUsername(req);
+    if (!effectiveUsername) {
+      throw ServiceValidationError.forField('creator_id', 'Unable to resolve the authenticated user identity', {
+        operation: 'create_survey',
+        service: 'survey',
+      });
+    }
+    const effectiveName = getEffectiveName(req);
     const enrichedData: CreateSurveyRequest = {
       ...surveyData,
-      creator_id: (user?.['sub'] as string) || '',
-      creator_username: (user?.['nickname'] as string) || (user?.['name'] as string) || '',
-      creator_name: (user?.['name'] as string) || '',
+      creator_id: effectiveUsername,
+      creator_username: effectiveUsername,
+      creator_name: effectiveName || '',
     };
 
-    const sanitizedPayload = logger.sanitize({ surveyData: enrichedData });
-    logger.debug(req, 'create_survey', 'Creating survey payload', sanitizedPayload);
+    // Log only safe, non-PII survey metadata. logger.sanitize redacts top-level keys only, so the
+    // nested creator_id / creator_username LFID values (PII) would leak if we logged enrichedData.
+    logger.debug(req, 'create_survey', 'Creating survey payload', {
+      survey_monkey_id: enrichedData.survey_monkey_id,
+      committee_uid: enrichedData.committee_uid,
+      send_immediately: enrichedData.send_immediately,
+      is_project_survey: enrichedData.is_project_survey,
+      has_creator: !!enrichedData.creator_id,
+    });
 
     const newSurvey = await this.microserviceProxy.proxyRequest<Survey>(req, 'LFX_V2_SERVICE', '/surveys', 'POST', undefined, enrichedData, {
       ['X-Sync']: 'true',

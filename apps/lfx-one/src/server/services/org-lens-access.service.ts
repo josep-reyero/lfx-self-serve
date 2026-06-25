@@ -16,7 +16,7 @@ import {
 import { Request } from 'express';
 
 import { MicroserviceError } from '../errors';
-import { getEffectiveSub } from '../utils/auth-helper';
+import { getEffectiveSub, getEffectiveUsername } from '../utils/auth-helper';
 import { logger } from './logger.service';
 import { MicroserviceProxyService } from './microservice-proxy.service';
 import { OrgLensKeyContactsService } from './org-lens-key-contacts.service';
@@ -178,10 +178,10 @@ export class OrgLensAccessService {
 
   /** Caller can manage iff the selected org uid is a direct writer grant (D-005). UX gate only. */
   private async resolveCanManage(req: Request, orgUid: string): Promise<boolean> {
-    const username = getEffectiveSub(req);
+    const username = getEffectiveUsername(req);
     if (!username) return false;
     try {
-      const grants = await this.roleGrants.getRoleGrants(req, username);
+      const grants = await this.roleGrants.getRoleGrants(req, username, getEffectiveSub(req));
       return grants.writers.includes(orgUid);
     } catch (error) {
       logger.warning(req, 'resolve_org_access_can_manage', 'Role-grants lookup failed; defaulting canManage=false', {
@@ -205,14 +205,14 @@ export class OrgLensAccessService {
         path: `/b2b_orgs/${orgUid}/settings/users`,
       });
 
-    const username = getEffectiveSub(req);
+    const username = getEffectiveUsername(req);
     if (!username) {
       throw forbidden();
     }
 
     let isWriter: boolean;
     try {
-      const grants = await this.roleGrants.getRoleGrants(req, username);
+      const grants = await this.roleGrants.getRoleGrants(req, username, getEffectiveSub(req));
       isWriter = grants.writers.includes(orgUid);
     } catch (error) {
       // Couldn't verify (transient role-grants outage) — surface a retriable error, not a 403.

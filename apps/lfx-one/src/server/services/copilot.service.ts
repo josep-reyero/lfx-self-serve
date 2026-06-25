@@ -22,8 +22,9 @@ export class CopilotService {
    * parsing the full response and yielding blocks.
    */
   public async *streamQuery(req: Request, params: CopilotQueryParams, abortSignal?: AbortSignal): AsyncGenerator<CopilotSSEEvent> {
+    // Do not log params.userId: it is now the LFID username (identity PII) and the
+    // logger does not redact `user_id`. It is still forwarded to the upstream API below.
     logger.debug(req, 'copilot_stream_query', 'Calling LFX Copilot API (stream=true)', {
-      user_id: params.userId,
       has_session: !!params.sessionId,
       has_context: !!params.context,
     });

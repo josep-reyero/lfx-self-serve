@@ -435,7 +435,7 @@ export interface CreateSurveyRequest {
   creator_username?: string;
   /** Display name of the creator (enriched server-side from OIDC session) */
   creator_name?: string;
-  /** Auth0 user ID of the creator (enriched server-side from OIDC session) */
+  /** LFID username of the creator (enriched server-side from the effective identity) */
   creator_id?: string;
 }
 

@@ -122,7 +122,7 @@ import FormData from 'form-data';
 import { ResourceNotFoundError, ServiceValidationError } from '../errors';
 import { pollEndpoint } from '../helpers/poll-endpoint.helper';
 import { fetchAllQueryResources } from '../helpers/query-service.helper';
-import { cleanUserDisplayName } from '../utils/auth-helper';
+import { cleanUserDisplayName, usernameMatches } from '../utils/auth-helper';
 import { AccessCheckService } from './access-check.service';
 import { ETagService } from './etag.service';
 import { logger } from './logger.service';
@@ -407,7 +407,7 @@ export class ProjectService {
     manualUserInfo?: { name: string; email: string; username?: string; avatar?: string }
   ): Promise<ProjectSettings> {
     // Step 1: Fetch current settings with ETag first.
-    // Settings must be fetched before resolveEmailToSub so that manually-added users
+    // Settings must be fetched before resolveEmailToUsername so that manually-added users
     // (not present in the NATS directory) can be matched by email fallback and skip
     // the NATS call that would otherwise throw NOT_FOUND before we reach array logic.
     const { data: settings, etag } = await this.etagService.fetchWithETag<ProjectSettings>(
@@ -426,7 +426,7 @@ export class ProjectService {
 
     // Step 3: Determine the backend identifier for array operations.
     // For emails on update/remove: check settings first. If the user is stored without
-    // a username (manually added, not in NATS), skip resolveEmailToSub and use the
+    // a username (manually added, not in NATS), skip resolveEmailToUsername and use the
     // email directly — calling NATS for such users would fail with NOT_FOUND.
     const originalEmail = usernameOrEmail.includes('@') ? usernameOrEmail.trim().toLowerCase() : '';
     const matchesByEmail = (u: { username?: string; email?: string }): boolean => !u.username && !!originalEmail && u.email?.toLowerCase() === originalEmail;
@@ -435,19 +435,24 @@ export class ProjectService {
     let backendIdentifier = usernameOrEmail.trim();
     if (originalEmail) {
       if ((existingByEmail && (operation === 'update' || operation === 'remove')) || manualUserInfo) {
-        // Skip resolveEmailToSub in two cases:
+        // Skip resolveEmailToUsername in two cases:
         // 1. update/remove on a no-username user found by email in settings (not in NATS)
         // 2. manual-add — the user was not found in the directory; NATS would return NOT_FOUND
         backendIdentifier = originalEmail;
       } else {
-        backendIdentifier = await this.resolveEmailToSub(req, usernameOrEmail);
+        backendIdentifier = await this.resolveEmailToUsername(req, usernameOrEmail);
       }
     }
 
-    // Some users stored in settings pre-date username normalization and have an empty username.
-    // Match by email as a fallback so edits/removals work for those users too.
+    // Match a stored grant against the caller's target identifier. Three cases, in order:
+    // 1. Exact / prefix-insensitive username match. During the LFID migration, settings may still
+    //    store `auth0|<lfid>` while `backendIdentifier` is the bare LFID (or vice versa), so compare
+    //    with `usernameMatches`, which strips the `auth0|` provider prefix on both sides. Without this
+    //    a remove/update by email could leave the legacy `auth0|...` grant behind (orphaned access)
+    //    or append a duplicate LFID grant beside it.
+    // 2. Empty stored username + matching email — users that pre-date username normalization.
     const matchesUser = (u: { username?: string; email?: string }): boolean => {
-      if (u.username && u.username === backendIdentifier) return true;
+      if (u.username && usernameMatches(backendIdentifier, u.username)) return true;
       if (!u.username && originalEmail && u.email?.toLowerCase() === originalEmail) return true;
       return false;
     };
@@ -580,7 +585,7 @@ export class ProjectService {
           });
         }
 
-        // Extract sub (username) from JSON success response or JSON string
+        // Extract sub from JSON success response or JSON string
         username = typeof parsed === 'string' ? parsed : parsed.sub || parsed.username;
       } catch (parseError) {
         // Re-throw ResourceNotFoundError as-is
@@ -671,8 +676,11 @@ export class ProjectService {
           });
         }
 
-        // Extract username from JSON success response or JSON string
-        username = typeof parsed === 'string' ? parsed : parsed.username;
+        // Extract username from JSON success response or JSON string. During the LFID migration the
+        // resolver may still return only `{ sub }`; fall back to it so email-based permission edits
+        // resolve to an identifier instead of throwing NOT_FOUND. matchesUser strips the auth prefix
+        // so an `auth0|<lfid>` sub still matches a stored LFID grant.
+        username = typeof parsed === 'string' ? parsed : parsed.username || parsed.sub;
       } catch (parseError) {
         // Re-throw ResourceNotFoundError as-is
         if (parseError instanceof ResourceNotFoundError) {
@@ -741,9 +749,6 @@ export class ProjectService {
 
     if (usernameOrEmail.includes('@')) {
       originalEmail = usernameOrEmail;
-      // First confirm the user exists with email_to_sub
-      await this.resolveEmailToSub(req, usernameOrEmail);
-      // Then get the username for user metadata lookup
       usernameForLookup = await this.resolveEmailToUsername(req, usernameOrEmail);
       logger.debug(req, 'get_user_info', 'Email resolved to username', {
         email: originalEmail,
